@@ -1,5 +1,5 @@
-BEGIN;
-create schema kafka;
+-- complain if script is sourced in psql, rather than via CREATE EXTENSION
+\echo Use "CREATE EXTENSION kafka" to load this file. \quit
 
 create function kafka.produce(varchar, varchar)
 returns boolean as 'pg_kafka.so', 'pg_kafka_produce'
@@ -19,17 +19,9 @@ language C immutable;
 comment on function kafka.close() is 
 'Closes the broker connections to Kafka.';
 
-create function kafka.flush() 
-returns boolean as 'pg_kafka.so', 'pg_kafka_flush'
-language C immutable;
-
-comment on function kafka.flush() is 
-'Flushes messages.';
-
 create table kafka.broker (
   host text not null,
   port integer not null default 9092,
   primary key(host, port)
 );
 
-COMMIT;
