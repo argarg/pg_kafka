@@ -86,6 +86,14 @@ static rd_kafka_t *get_rk() {
 
   /* kafka configuration */
   rd_kafka_conf_t *conf = rd_kafka_conf_new();
+
+  /* add brokers */
+  if (rd_kafka_conf_set(conf, "bootstrap.servers", brokers, errstr,
+                        sizeof(errstr)) != RD_KAFKA_CONF_OK) {
+    elog(WARNING, "%s\n", errstr);
+    return NULL;
+  }
+
   if (rd_kafka_conf_set(conf, "compression.codec", "snappy", errstr,
                         sizeof(errstr)) != RD_KAFKA_CONF_OK) {
     elog(WARNING, "%s\n", errstr);
@@ -101,14 +109,8 @@ static rd_kafka_t *get_rk() {
   }
 
   /* set logger */
-  rd_kafka_set_logger(rk, rk_logger);
+  rd_kafka_conf_set_log_cb(conf, rk_logger);
   rd_kafka_set_log_level(rk, LOG_INFO);
-
-  /* add brokers */
-  if (rd_kafka_brokers_add(rk, brokers) == 0) {
-    elog(WARNING, "%% No valid brokers specified\n");
-    goto broken;
-  }
 
   GRK = rk;
   return rk;
@@ -126,14 +128,17 @@ static void rk_destroy() {
 static void pg_xact_callback(XactEvent event, void *arg) {
   switch (event) {
     case XACT_EVENT_COMMIT:
+    case XACT_EVENT_PARALLEL_COMMIT:
       break;
     case XACT_EVENT_ABORT:
+    case XACT_EVENT_PARALLEL_ABORT:
       rk_destroy();
       break;
     case XACT_EVENT_PREPARE:
       /* nothin' */
       break;
     case XACT_EVENT_PRE_COMMIT:
+    case XACT_EVENT_PARALLEL_PRE_COMMIT:
       /* nothin' */
       break;
     case XACT_EVENT_PRE_PREPARE:
@@ -171,9 +176,13 @@ Datum pg_kafka_produce(PG_FUNCTION_ARGS) {
     if (rv == -1) {
       fprintf(stderr, "%% Failed to produce to topic %s partition %i: %s\n",
               rd_kafka_topic_name(rkt), partition,
-              rd_kafka_err2str(rd_kafka_errno2err(errno)));
+              rd_kafka_err2str(rd_kafka_last_error()));
       /* poll to handle delivery reports */
       rd_kafka_poll(rk, 0);
+    } else {
+      rv = rd_kafka_flush(rk, 1000);
+      if (rv == RD_KAFKA_RESP_ERR__TIMED_OUT)
+        fprintf(stderr, "Flush timed out\n");
     }
 
     /* destroy kafka topic */
