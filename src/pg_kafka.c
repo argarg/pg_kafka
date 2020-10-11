@@ -1,7 +1,7 @@
 /*
  * pg_kafka - PostgreSQL extension to produce messages to Apache Kafka
  *
- * Copyright (c) 2014 Xavier Stevens
+ * Copyright (c) 2014 Xavier Stevens (c) 2020 Marc-Antoine Parent
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -26,6 +26,7 @@
 #include <syslog.h>
 #include <sys/time.h>
 #include <errno.h>
+#include <search.h>
 
 #include "postgres.h"
 #include "fmgr.h"
@@ -119,8 +120,69 @@ broken:
   return NULL;
 }
 
+typedef struct topic_record {
+  const char* name;
+  rd_kafka_topic_t* topic;  
+} topic_record;
+
+static int compare_topic_records(const void* a, const void* b) {
+  return strcmp(((topic_record*)a)->name, ((topic_record*)b)->name);
+}
+
+
+static void* TOPICS = NULL;
+
+static rd_kafka_topic_t* get_topic(rd_kafka_t *rk, const char* name) {
+  topic_record search_record = {name, NULL};
+  topic_record** node = tfind(&search_record, &TOPICS, &compare_topic_records);
+  if (node == NULL) {
+    topic_record* record = malloc(sizeof(topic_record));
+    record->name = malloc(strlen(name)+1);
+    strcpy((char*)record->name, name);
+    rd_kafka_topic_conf_t *topic_conf = rd_kafka_topic_conf_new();
+    record->topic = rd_kafka_topic_new(rk, name, topic_conf);
+    node = tsearch(record, &TOPICS, &compare_topic_records);
+  }
+  return (*node)->topic;
+}
+
+
+static const topic_record* TOPIC_LEAF = NULL;
+
+static void record_leaf(const void* nodep, VISIT which, int level) {
+  if (which == leaf) {
+    TOPIC_LEAF = *(const topic_record**)nodep;
+  }
+}
+
+static void delete_topics() {
+  while (true) {
+    // find any one leaf
+    TOPIC_LEAF = NULL;
+    twalk(TOPICS, &record_leaf);
+    if (TOPIC_LEAF == NULL) break;
+    const topic_record* record = TOPIC_LEAF;
+    free((void*)record->name);
+    rd_kafka_topic_destroy(record->topic);
+    tdelete(record, &TOPICS, &compare_topic_records);
+  }
+  TOPICS = NULL;
+}
+
+
+PG_FUNCTION_INFO_V1(pg_kafka_flush);
+Datum pg_kafka_flush(PG_FUNCTION_ARGS) {
+  rd_kafka_t *rk = get_rk();
+  rd_kafka_flush(rk, 1000);
+  delete_topics();
+  PG_RETURN_VOID();
+}
+
+
 static void rk_destroy() {
   rd_kafka_t *rk = get_rk();
+  rd_kafka_flush(rk, 1000);
+  delete_topics();
   rd_kafka_destroy(rk);
   GRK = NULL;
 }
@@ -160,12 +222,11 @@ Datum pg_kafka_produce(PG_FUNCTION_ARGS) {
     void *msg = VARDATA_ANY(msg_txt);
     size_t msg_len = VARSIZE_ANY_EXHDR(msg_txt);
     /* create topic */
-    rd_kafka_topic_conf_t *topic_conf = rd_kafka_topic_conf_new();
     rd_kafka_t *rk = get_rk();
     if (!rk) {
       PG_RETURN_BOOL(0 != 0);
     }
-    rd_kafka_topic_t *rkt = rd_kafka_topic_new(rk, topic, topic_conf);
+    rd_kafka_topic_t *rkt = get_topic(rk, topic);
 
     /* using random partition for now */
     int partition = RD_KAFKA_PARTITION_UA;
@@ -179,15 +240,7 @@ Datum pg_kafka_produce(PG_FUNCTION_ARGS) {
               rd_kafka_err2str(rd_kafka_last_error()));
       /* poll to handle delivery reports */
       rd_kafka_poll(rk, 0);
-    } else {
-      rv = rd_kafka_flush(rk, 1000);
-      if (rv == RD_KAFKA_RESP_ERR__TIMED_OUT)
-        fprintf(stderr, "Flush timed out\n");
     }
-
-    /* destroy kafka topic */
-    rd_kafka_topic_destroy(rkt);
-    pfree(topic);
 
     PG_RETURN_BOOL(rv == 0);
   }
