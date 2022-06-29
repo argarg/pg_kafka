@@ -19,10 +19,4 @@ language C immutable;
 comment on function kafka.close() is 
 'Closes the broker connections to Kafka.';
 
-create table kafka.broker (
-  host text not null,
-  port integer not null default 9092,
-  primary key(host, port)
-);
-
 COMMIT;

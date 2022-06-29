@@ -23,6 +23,7 @@
  */
 
 #include <string.h>
+#include <stdlib.h>
 #include <syslog.h>
 #include <sys/time.h>
 #include <errno.h>
@@ -74,15 +75,9 @@ static rd_kafka_t *get_rk() {
   rd_kafka_t *rk;
   char errstr[512];
   char *brokers;
-  char *sql = "select string_agg(host || ':' || port, ',') from kafka.broker";
-  if (SPI_connect() == SPI_ERROR_CONNECT)
-    return NULL;
-  if (SPI_OK_SELECT == SPI_execute(sql, true, 100) && SPI_processed > 0) {
-    brokers = SPI_getvalue(SPI_tuptable->vals[0], SPI_tuptable->tupdesc, 1);
-  } else {
-    brokers = "localhost:9092";
-  }
-  SPI_finish();
+  brokers = getenv("KAFKA_BROKERS");
+  if (!brokers)
+      brokers = "localhost:9092";
 
   /* kafka configuration */
   rd_kafka_conf_t *conf = rd_kafka_conf_new();
